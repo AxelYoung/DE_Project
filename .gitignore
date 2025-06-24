@@ -5,7 +5,7 @@
 *.log
 *.out
 *.toc
-*.synctex.gz
+*.synctex*
 *.fls
 *.fdb_latexmk
 
@@ -13,4 +13,7 @@
 *.pdf
 
 # Large data file to be excluded from the repository
-owid-covid-data.csv 
+owid-covid-data.csv
+
+# macOS specific files
+.DS_Store 
