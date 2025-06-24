@@ -41,6 +41,16 @@
 % 用于定制图表标题
 \usepackage{caption}
 
+% 重新定义 abstract 环境以匹配正文字体大小和边距
+\renewenvironment{abstract}
+ {\normalsize
+  \begin{center}
+  \bfseries \abstractname
+  \end{center}
+  \list{}{\setlength{\leftmargin}{0em}\setlength{\rightmargin}{\leftmargin}}%
+  \item\relax}
+ {\endlist}
+
 % 定义主题颜色
 \definecolor{primarycolor}{rgb}{0.12, 0.3, 0.53} % A professional blue
 
