@@ -1,0 +1,16 @@
+# LaTeX intermediate files
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Generated PDF file
+*.pdf
+
+# Large data file to be excluded from the repository
+owid-covid-data.csv 

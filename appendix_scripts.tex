@@ -1,0 +1,364 @@
+\subsection{Deterministic Two-Stage Model Script (script.py)}
+\begin{lstlisting}[language=Python, caption={Python script for fitting a two-stage piecewise deterministic SEIAR model, corresponding to the pre- and post-lockdown phases.}]
+import pandas as pd
+import numpy as np
+from scipy.integrate import odeint
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+
+# --- Step 1: Import libraries and load data ---
+
+# Load the processed German epidemic data
+try:
+    df = pd.read_csv('germany_covid_processed.csv')
+    # Core fitting data: estimated total current infectious individuals
+    i_data = df['infectious_pool'].values
+    t_data = np.arange(len(i_data))
+    # Get total population N
+    N = df['population'].iloc[0]
+except FileNotFoundError:
+    print("Error: Data file 'germany_covid_processed.csv' not found.")
+    print("Please ensure you have run data_processing.py to generate this file.")
+    exit()
+
+# --- Global parameters and initial conditions ---
+# Fixed parameters (from literature in Part 2 of our report)
+F = 0.17       # Asymptomatic proportion
+SIGMA = 1/4.5    # Latent period transition rate (1/day)
+GAMMA_I = 1/19.5 # Symptomatic recovery rate (1/day)
+GAMMA_A = 1/17.0   # Asymptomatic recovery rate (1/day)
+
+# Initial conditions
+I0 = 0      # Assume no diagnosed symptomatic individuals at t=0
+A0 = 0      # Assume no asymptomatic individuals at t=0
+E0 = 1      # Key: Assume 1 exposed individual enters the population at t=0, as the "seed" of the epidemic
+R0 = 0
+S0 = N - I0 - E0 - A0 - R0
+Y0 = (S0, E0, I0, A0, R0) # Initial state tuple
+
+# --- Step 2: Define the SEIAR model function ---
+
+# Define the differential equations for the SEIAR model
+# We take all parameters as inputs to increase the function's versatility
+def seiar_model(y, t, N, beta_I, f_param, sigma_param, gamma_i_param, gamma_a_param):
+    """
+    ODE system for the SEIAR model.
+    beta_I is now a parameter, not a global variable.
+    """
+    S, E, I, A, R = y
+    
+    # Calculate beta_A based on the relationship from literature
+    beta_A = 0.58 * beta_I
+    
+    # Differential equations
+    dSdt = -beta_I * S * I / N - beta_A * S * A / N
+    dEdt = beta_I * S * I / N + beta_A * S * A / N - sigma_param * E
+    dIdt = (1 - f_param) * sigma_param * E - gamma_i_param * I
+    dAdt = f_param * sigma_param * E - gamma_a_param * A
+    dRdt = gamma_i_param * I + gamma_a_param * A
+    
+    return dSdt, dEdt, dIdt, dAdt, dRdt
+
+# --- Step 3: Create a new, more powerful "solver" function ---
+
+def fit_odeint_piecewise(t, beta_pre, beta_post, rho, E0_fit):
+    """
+    An advanced solver for curve_fit.
+    It uses a piecewise-changing beta and simultaneously fits the observation proportion rho and initial exposed count E0.
+    """
+    t_switch = 22  # Approximate date of Germany's national lockdown (2020-03-22), corresponding to day 22 in the data
+
+    # Update initial conditions with the fitted parameters
+    # E0 is to be fitted; I0, A0, R0 start from 0
+    y0_fit = (N - E0_fit, E0_fit, 0, 0, 0)
+
+    # Split the time array into "pre-lockdown" and "post-lockdown"
+    t_pre = t[t < t_switch]
+    t_post = t[t >= t_switch]
+
+    # Create an empty numpy array to store the combined infected population
+    infected_combined = np.array([])
+    
+    # Solve for the first phase (pre-lockdown)
+    if len(t_pre) > 0:
+        # Solve using the pre-lockdown beta
+        res_pre = odeint(seiar_model, y0_fit, t_pre, args=(N, beta_pre, F, SIGMA, GAMMA_I, GAMMA_A))
+        # Extract the I+A part
+        infected_pre = res_pre[:, 2] + res_pre[:, 3]
+        infected_combined = np.concatenate((infected_combined, infected_pre))
+        # The initial condition for the second phase is the end point of the first phase
+        y0_post = res_pre[-1]
+    else:
+        # If the fitting window is entirely after the lockdown, the initial condition for the second phase is our specified y0_fit
+        y0_post = y0_fit
+
+    # Solve for the second phase (post-lockdown)
+    if len(t_post) > 0:
+        # Solve using the post-lockdown beta
+        res_post = odeint(seiar_model, y0_post, t_post, args=(N, beta_post, F, SIGMA, GAMMA_I, GAMMA_A))
+        # Extract the I+A part
+        infected_post = res_post[:, 2] + res_post[:, 3]
+        infected_combined = np.concatenate((infected_combined, infected_post))
+
+    # Return the model prediction scaled by the observation proportion rho
+    return rho * infected_combined
+
+# --- Step 4: Perform the fit and visualize ---
+
+# Define the fitting window
+fit_duration = 180
+t_fit = t_data[:fit_duration]
+i_fit = i_data[:fit_duration]
+
+# Provide initial guesses and bounds for the 4 parameters to be fitted
+# Parameter order: [beta_pre, beta_post, rho, E0_fit]
+initial_guesses = [0.6, 0.1, 0.2, 100]
+bounds = (
+    [0.1, 0.01, 0.01, 1],      # Lower bounds
+    [2.0, 1.0, 1.0, 50000]     # Upper bounds
+)
+
+# Perform the fit
+try:
+    popt, pcov = curve_fit(
+        fit_odeint_piecewise,
+        t_fit, 
+        i_fit, 
+        p0=initial_guesses, 
+        bounds=bounds,
+        maxfev=3000  # Increase max iterations to help convergence
+    )
+    
+    # Extract optimal parameters
+    beta_pre_opt, beta_post_opt, rho_opt, E0_fit_opt = popt
+    
+    print("Fit successful!")
+    print(f"Pre-lockdown transmission rate (beta_pre): {beta_pre_opt:.4f}")
+    print(f"Post-lockdown transmission rate (beta_post): {beta_post_opt:.4f}")
+    print(f"Case observation proportion (rho): {rho_opt:.4f}")
+    print(f"Initial exposed population (E0_fit): {E0_fit_opt:.2f}")
+
+    # --- Visualization ---
+    
+    # Rerun the solver with optimal parameters to generate the final fitted curve
+    fitted_curve = fit_odeint_piecewise(t_fit, *popt)
+    
+    # Create the plot
+    plt.figure(figsize=(14, 9))
+    # Plot all real data points (entire time series)
+    plt.plot(t_data, i_data, 'o', label='Real Data (Estimated Total Infectious)', markersize=4, alpha=0.5)
+    # Plot the fitted curve within the fitting window
+    plt.plot(t_fit, fitted_curve, 'r-', label='Fitted SEIAR Model', linewidth=3)
+    
+    # Mark the lockdown date with a vertical line
+    t_switch = 22
+    plt.axvline(x=t_switch, color='k', linestyle='--', label=f'Lockdown Start (Day {t_switch})')
+    
+    # Annotate the plot with the optimal parameter values
+    param_text = (
+        f'Fitted Parameters:\n'
+        f'$\\beta_{{pre}}$ = {beta_pre_opt:.3f}\n'
+        f'$\\beta_{{post}}$ = {beta_post_opt:.3f}\n'
+        f'$\\rho$ (rho) = {rho_opt:.3f}\n'
+        f'$E_0$ = {E0_fit_opt:.0f}'
+    )
+    plt.text(0.65, 0.7, param_text, transform=plt.gca().transAxes, fontsize=12,
+             verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
+    
+    # Format the plot
+    plt.title('SEIAR Model with Piecewise Beta Fit to German COVID-19 Data', fontsize=16)
+    plt.xlabel('Days Since 2020-03-01', fontsize=12)
+    plt.ylabel('Infectious Population', fontsize=12)
+    plt.legend(fontsize=11)
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.ylim(bottom=0)
+    plt.xlim(left=0, right=len(t_data))
+    
+    # Save the figure
+    plt.savefig('seiar_fit_germany_piecewise.png', dpi=300)
+    print("\nFit result plot saved as 'seiar_fit_germany_piecewise.png'")
+    
+    # Display the plot
+    plt.show()
+
+except RuntimeError as e:
+    print(f"Error: Could not complete the fit. Error message: {e}")
+    print("This might be due to poor initial guesses or bounds. Try adjusting `initial_guesses` and `bounds`.")
+
+except Exception as e:
+    print(f"An unknown error occurred: {e}")
+\end{lstlisting}
+
+\subsection{Deterministic Four-Stage Model Script (script\_piecewise.py)}
+\begin{lstlisting}[language=Python, caption={Python script for fitting a four-stage piecewise deterministic SEIAR model, aligning with the Bayesian model's structure.}]
+import pandas as pd
+import numpy as np
+from scipy.integrate import odeint
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+def seiar_model(y, t, beta, N, f, sigma, gamma_i, gamma_a):
+    """
+    Standard SEIAR model ODE function for use by the internal solver.
+    """
+    S, E, I, A, R = y
+    beta_a = 0.58 * beta  # Asymptomatic transmission rate is a fixed relative proportion
+    
+    force_of_infection = (beta * I + beta_a * A) * S / N
+    
+    dSdt = -force_of_infection
+    dEdt = force_of_infection - sigma * E
+    dIdt = (1 - f) * sigma * E - gamma_i * I
+    dAdt = f * sigma * E - gamma_a * A
+    dRdt = gamma_i * I + gamma_a * A
+    
+    return [dSdt, dEdt, dIdt, dAdt, dRdt]
+
+def piecewise_seiar_model(t_data, beta1, beta2, beta3, beta4):
+    """
+    Piecewise SEIAR model for use with curve_fit.
+    This function takes an array of time points and four beta parameters,
+    and returns the predicted (I+A) curve for the entire period.
+    """
+    # Define breakpoints (consistent with the Bayesian model)
+    breakpoints = [22, 71, 184]
+    betas = [beta1, beta2, beta3, beta4]
+    
+    # Full time span
+    t_full = np.arange(len(t_data))
+    
+    # Initialize the overall solution
+    solution = np.array([]).reshape(0, 5)
+    
+    # Initial conditions
+    # Get an estimate for initial E0 from the data (a small non-zero value)
+    # We could also make E0 a fitting parameter, but for simplicity, we use a reasonable estimate here.
+    initial_exposed = 500 
+    current_y0 = [N - initial_exposed, initial_exposed, 0, 0, 0]
+    
+    # Solve the ODE segment by segment
+    last_t = 0
+    for i, bp in enumerate(breakpoints):
+        # Define the time array for the current segment
+        t_segment = np.arange(last_t, bp)
+        
+        # Solve the current segment
+        sol_segment = odeint(
+            seiar_model,
+            y0=current_y0,
+            t=t_segment,
+            args=(betas[i], N, F, SIGMA, GAMMA_I, GAMMA_A)
+        )
+        
+        # Concatenate the solution
+        solution = np.vstack([solution, sol_segment])
+        
+        # Update initial conditions and start time for the next segment
+        current_y0 = sol_segment[-1]
+        last_t = bp
+
+    # Solve the final segment
+    t_segment_final = np.arange(last_t, len(t_full))
+    sol_segment_final = odeint(
+        seiar_model,
+        y0=current_y0,
+        t=t_segment_final,
+        args=(betas[-1], N, F, SIGMA, GAMMA_I, GAMMA_A)
+    )
+    
+    # Concatenate the final segment's solution
+    solution = np.vstack([solution, sol_segment_final])
+
+    # Return the model's predicted total infected population (I+A)
+    return solution[:, 2] + solution[:, 3]
+
+
+# --- 1. Load and prepare data ---
+df_data = pd.read_csv('germany_covid_processed.csv', parse_dates=['date'])
+
+# Define model parameters (based on literature)
+F = 0.17
+SIGMA = 1/4.5
+GAMMA_I = 1/19.5
+GAMMA_A = 1/17.0
+N = df_data['population'].iloc[0]
+
+# Prepare data for fitting (using the first 270 days)
+fit_duration = 270
+data_to_fit = df_data.head(fit_duration)
+y_data = data_to_fit['infectious_pool'].values
+x_data = np.arange(len(y_data))
+dates = data_to_fit['date']
+
+# --- 2. Perform piecewise deterministic fit ---
+print("Performing piecewise deterministic fit...")
+
+# Provide initial guesses and bounds for the four beta parameters
+initial_guesses = [0.2, 0.1, 0.15, 0.1]
+bounds = (0, [1.0, 1.0, 1.0, 1.0]) # Beta values are typically between 0 and 1
+
+# Call curve_fit
+popt, pcov = curve_fit(
+    f=piecewise_seiar_model,
+    xdata=x_data,
+    ydata=y_data,
+    p0=initial_guesses,
+    bounds=bounds,
+    method='trf' # 'trf' is suitable for bounded problems
+)
+
+# Extract optimal parameters
+beta_opt = popt
+print("\nFit complete! Optimal parameters are:")
+for i, b in enumerate(beta_opt):
+    print(f"  - beta_{i+1}: {b:.4f}")
+
+# --- 3. Generate final fitted curve and plot ---
+print("\nGenerating final fit plot...")
+# Generate the final model curve using the optimal parameters
+model_fit_curve = piecewise_seiar_model(x_data, *beta_opt)
+
+# Plotting
+plt.style.use('seaborn-v0_8-whitegrid')
+fig, ax = plt.subplots(figsize=(14, 8))
+
+# Plot real data
+ax.plot(dates, y_data, 'o', markersize=4, color='dimgray', alpha=0.7, label='Observed Infectious Pool')
+
+# Plot model fit curve
+ax.plot(dates, model_fit_curve, color='dodgerblue', linewidth=2.5, label='Piecewise SEIAR Model Fit')
+
+# Add vertical lines and labels for segments
+breakpoints_days = [22, 71, 184]
+for i, bp_day in enumerate(breakpoints_days):
+    bp_date = dates.iloc[0] + pd.to_timedelta(bp_day, unit='D')
+    ax.axvline(x=bp_date, linestyle='--', color='gray', linewidth=1.5)
+    
+# Add parameter labels
+bp_dates = [dates.iloc[0]] + [dates.iloc[0] + pd.to_timedelta(d, unit='D') for d in breakpoints_days]
+label_positions = [5, 35, 120, 200]
+for i, pos in enumerate(label_positions):
+     ax.text(dates.iloc[pos], max(y_data)*0.85, f'$\\beta_{i+1}={beta_opt[i]:.3f}$', 
+             fontsize=12, backgroundcolor='white', color='blue')
+
+# Format the plot
+ax.set_title('Piecewise Deterministic SEIAR Model Fit to German COVID-19 Data', fontsize=16, pad=20)
+ax.set_xlabel('Date', fontsize=12)
+ax.set_ylabel('Estimated Infectious Population', fontsize=12)
+ax.legend(fontsize=11)
+ax.grid(True)
+
+# Format date display
+ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+fig.autofmt_xdate()
+
+# Save the figure
+output_filename = 'seiar_fit_germany_piecewise.png'
+plt.tight_layout()
+plt.savefig(output_filename, dpi=300)
+
+print(f"\nSuccess! Final fit plot saved as '{output_filename}'")
+plt.show() 
+\end{lstlisting} 
